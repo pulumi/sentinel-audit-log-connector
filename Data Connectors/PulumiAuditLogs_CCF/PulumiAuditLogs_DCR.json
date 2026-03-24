@@ -1,0 +1,47 @@
+{
+    "name": "PulumiAuditLogsDCR",
+    "apiVersion": "2021-09-01-preview",
+    "type": "Microsoft.Insights/dataCollectionRules",
+    "location": "{{location}}",
+    "properties": {
+        "dataCollectionEndpointId": "{{dataCollectionEndpointId}}",
+        "streamDeclarations": {
+            "Custom-PulumiAuditLogs": {
+                "columns": [
+                    { "name": "timestamp", "type": "long" },
+                    { "name": "sourceIP", "type": "string" },
+                    { "name": "event", "type": "string" },
+                    { "name": "description", "type": "string" },
+                    { "name": "user", "type": "dynamic" },
+                    { "name": "tokenID", "type": "string" },
+                    { "name": "tokenName", "type": "string" },
+                    { "name": "actorName", "type": "string" },
+                    { "name": "actorUrn", "type": "string" },
+                    { "name": "reqOrgAdmin", "type": "boolean" },
+                    { "name": "reqStackAdmin", "type": "boolean" },
+                    { "name": "authFailure", "type": "boolean" }
+                ]
+            }
+        },
+        "destinations": {
+            "logAnalytics": [
+                {
+                    "workspaceResourceId": "{{workspaceResourceId}}",
+                    "name": "clv2ws1"
+                }
+            ]
+        },
+        "dataFlows": [
+            {
+                "streams": [
+                    "Custom-PulumiAuditLogs"
+                ],
+                "destinations": [
+                    "clv2ws1"
+                ],
+                "transformKql": "source | extend TimeGenerated = datetime(1970-01-01) + tolong(timestamp) * 1s | extend Timestamp_d = tolong(timestamp) | extend SourceIP_s = tostring(sourceIP) | extend Event_s = tostring(event) | extend Description_s = tostring(description) | extend UserName_s = tostring(user.name) | extend UserLogin_s = tostring(user.githubLogin) | extend UserAvatarUrl_s = tostring(user.avatarUrl) | extend TokenID_s = tostring(tokenID) | extend TokenName_s = tostring(tokenName) | extend ActorName_s = tostring(actorName) | extend ActorUrn_s = tostring(actorUrn) | extend RequireOrgAdmin_b = tobool(reqOrgAdmin) | extend RequireStackAdmin_b = tobool(reqStackAdmin) | extend AuthFailure_b = tobool(authFailure) | project TimeGenerated, Timestamp_d, SourceIP_s, Event_s, Description_s, UserName_s, UserLogin_s, UserAvatarUrl_s, TokenID_s, TokenName_s, ActorName_s, ActorUrn_s, RequireOrgAdmin_b, RequireStackAdmin_b, AuthFailure_b",
+                "outputStream": "Custom-PulumiAuditLogs_CL"
+            }
+        ]
+    }
+}

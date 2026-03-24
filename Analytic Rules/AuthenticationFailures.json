@@ -1,0 +1,48 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "workspace": {
+            "type": "string"
+        }
+    },
+    "resources": [
+        {
+            "type": "Microsoft.SecurityInsights/AlertRuleTemplates",
+            "apiVersion": "2022-04-01-preview",
+            "name": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "kind": "Scheduled",
+            "properties": {
+                "displayName": "Pulumi Cloud - Excessive Authentication Failures",
+                "description": "Detects when there are more than 5 authentication failures from a single IP address within a 15-minute window. This may indicate a brute force attack or compromised credentials.",
+                "severity": "Medium",
+                "enabled": true,
+                "query": "PulumiAuditLogs_CL\n| where AuthFailure_b == true\n| summarize FailCount = count() by SourceIP_s, bin(TimeGenerated, 15m)\n| where FailCount > 5\n| extend IPCustomEntity = SourceIP_s",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "PT15M",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                    "CredentialAccess",
+                    "InitialAccess"
+                ],
+                "techniques": [
+                    "T1110"
+                ],
+                "entityMappings": [
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "SourceIP_s"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    ]
+}
