@@ -40,9 +40,7 @@
         "paging": {
             "pagingType": "NextPageToken",
             "nextPageTokenJsonPath": "$.continuationToken",
-            "nextPageParaName": "continuationToken",
-            "pageSizeParaName": "pageSize",
-            "pageSize": 1000
+            "nextPageParaName": "continuationToken"
         },
         "isActive": true
     }

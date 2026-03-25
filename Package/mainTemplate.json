@@ -123,9 +123,9 @@
             }
         },
         {
-            "type": "Microsoft.SecurityInsights/dataConnectorDefinitions",
+            "type": "Microsoft.OperationalInsights/workspaces/providers/dataConnectorDefinitions",
             "apiVersion": "2022-09-01-preview",
-            "name": "PulumiAuditLogsDefinition",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/PulumiAuditLogsDefinition')]",
             "location": "[parameters('location')]",
             "kind": "Customizable",
             "properties": {
@@ -256,59 +256,6 @@
                         }
                     ]
                 }
-            }
-        },
-        {
-            "type": "Microsoft.SecurityInsights/dataConnectors",
-            "apiVersion": "2022-12-01-preview",
-            "name": "PulumiAuditLogsPoller",
-            "location": "[parameters('location')]",
-            "kind": "RestApiPoller",
-            "dependsOn": [
-                "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName'))]",
-                "[resourceId('Microsoft.SecurityInsights/dataConnectorDefinitions', 'PulumiAuditLogsDefinition')]"
-            ],
-            "properties": {
-                "connectorDefinitionName": "PulumiAuditLogsDefinition",
-                "dcrConfig": {
-                    "dataCollectionEndpoint": "[reference(variables('dataCollectionEndpointId'), '2021-09-01-preview').logsIngestion.endpoint]",
-                    "dataCollectionRuleImmutableId": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName')), '2021-09-01-preview').immutableId]",
-                    "streamName": "Custom-PulumiAuditLogs"
-                },
-                "dataType": "PulumiAuditLogs_CL",
-                "auth": {
-                    "type": "APIKey",
-                    "apiKeyName": "Authorization",
-                    "ApiKey": "[[parameters('apikey')]",
-                    "apiKeyIdentifier": "token"
-                },
-                "request": {
-                    "apiEndpoint": "[[concat(if(empty(parameters('ApiUrl')), 'https://api.pulumi.com', parameters('ApiUrl')), '/api/orgs/', parameters('OrgName'), '/auditlogs/v2')]",
-                    "httpMethod": "GET",
-                    "queryTimeFormat": "UnixTimestamp",
-                    "startTimeAttributeName": "startTime",
-                    "endTimeAttributeName": "endTime",
-                    "queryWindowInMin": 5,
-                    "rateLimitQPS": 2,
-                    "retryCount": 3,
-                    "timeoutInSeconds": 60,
-                    "headers": {
-                        "Accept": "application/json",
-                        "User-Agent": "Scuba"
-                    }
-                },
-                "response": {
-                    "eventsJsonPaths": ["$.auditLogEvents"],
-                    "format": "json"
-                },
-                "paging": {
-                    "pagingType": "NextPageToken",
-                    "nextPageTokenJsonPath": "$.continuationToken",
-                    "nextPageParaName": "continuationToken",
-                    "pageSizeParaName": "pageSize",
-                    "pageSize": 1000
-                },
-                "isActive": true
             }
         }
     ]
