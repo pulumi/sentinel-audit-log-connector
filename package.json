@@ -1,0 +1,13 @@
+{
+    "name": "azure-sentinel-pulumi-connector",
+    "version": "1.0.0",
+    "description": "Deploy a Sentinel connector that continuously exports Pulumi Cloud audit logs to Log Analytics",
+    "main": "index.ts",
+    "devDependencies": {
+        "@types/node": "^22"
+    },
+    "dependencies": {
+        "@pulumi/azure-native": "^2",
+        "@pulumi/pulumi": "^3"
+    }
+}
