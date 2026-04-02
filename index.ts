@@ -330,6 +330,122 @@ const dataConnector = new RestApiPollerDataConnector("dataConnector", {
 }, { dependsOn: [connectorDefinition, dataCollectionRule] });
 
 // ---------------------------------------------------------------------------
+// 6. Analytic rules
+// ---------------------------------------------------------------------------
+
+const authFailureRule = new azure_native.securityinsights.ScheduledAlertRule("authFailureRule", {
+    resourceGroupName,
+    workspaceName,
+    kind: "Scheduled",
+    displayName: "Pulumi Cloud - Excessive Authentication Failures",
+    description: "Detects when there are more than 5 authentication failures from a single IP address within a 15-minute window. This may indicate a brute force attack or compromised credentials.",
+    severity: "Medium",
+    enabled: true,
+    query: [
+        "PulumiAuditLogs_CL",
+        "| where AuthFailure_b == true",
+        "| summarize FailCount = count() by SourceIP_s, bin(TimeGenerated, 15m)",
+        "| where FailCount > 5",
+        "| extend IPCustomEntity = SourceIP_s",
+    ].join("\n"),
+    queryFrequency: "PT15M",
+    queryPeriod: "PT15M",
+    triggerOperator: "GreaterThan",
+    triggerThreshold: 0,
+    suppressionDuration: "PT1H",
+    suppressionEnabled: false,
+    tactics: ["CredentialAccess", "InitialAccess"],
+    techniques: ["T1110"],
+    entityMappings: [{
+        entityType: "IP",
+        fieldMappings: [{
+            identifier: "Address",
+            columnName: "SourceIP_s",
+        }],
+    }],
+}, { dependsOn: [table] });
+
+const stackDeletionRule = new azure_native.securityinsights.ScheduledAlertRule("stackDeletionRule", {
+    resourceGroupName,
+    workspaceName,
+    kind: "Scheduled",
+    displayName: "Pulumi Cloud - Stack Deleted",
+    description: "Detects when a Pulumi stack is deleted. Stack deletion is a destructive operation that removes all infrastructure state. This may be legitimate maintenance or could indicate unauthorized activity.",
+    severity: "Medium",
+    enabled: true,
+    query: [
+        "PulumiAuditLogs_CL",
+        '| where Event_s == "stack-deleted"',
+        "| extend AccountCustomEntity = UserLogin_s",
+        "| extend IPCustomEntity = SourceIP_s",
+    ].join("\n"),
+    queryFrequency: "PT5M",
+    queryPeriod: "PT5M",
+    triggerOperator: "GreaterThan",
+    triggerThreshold: 0,
+    suppressionDuration: "PT1H",
+    suppressionEnabled: false,
+    tactics: ["Impact"],
+    techniques: ["T1485"],
+    entityMappings: [
+        {
+            entityType: "Account",
+            fieldMappings: [{
+                identifier: "Name",
+                columnName: "UserLogin_s",
+            }],
+        },
+        {
+            entityType: "IP",
+            fieldMappings: [{
+                identifier: "Address",
+                columnName: "SourceIP_s",
+            }],
+        },
+    ],
+}, { dependsOn: [table] });
+
+const orgMemberChangeRule = new azure_native.securityinsights.ScheduledAlertRule("orgMemberChangeRule", {
+    resourceGroupName,
+    workspaceName,
+    kind: "Scheduled",
+    displayName: "Pulumi Cloud - Organization Membership Change",
+    description: "Detects when organization membership changes occur, including members being added, removed, or having their roles changed. These events are important for tracking access control changes to your infrastructure management platform.",
+    severity: "Low",
+    enabled: true,
+    query: [
+        "PulumiAuditLogs_CL",
+        '| where Event_s in ("member-added", "member-removed", "member-role-changed")',
+        "| extend AccountCustomEntity = UserLogin_s",
+        "| extend IPCustomEntity = SourceIP_s",
+    ].join("\n"),
+    queryFrequency: "PT5M",
+    queryPeriod: "PT5M",
+    triggerOperator: "GreaterThan",
+    triggerThreshold: 0,
+    suppressionDuration: "PT1H",
+    suppressionEnabled: false,
+    tactics: ["Persistence"],
+    techniques: ["T1098"],
+    entityMappings: [
+        {
+            entityType: "Account",
+            fieldMappings: [{
+                identifier: "Name",
+                columnName: "UserLogin_s",
+            }],
+        },
+        {
+            entityType: "IP",
+            fieldMappings: [{
+                identifier: "Address",
+                columnName: "SourceIP_s",
+            }],
+        },
+    ],
+}, { dependsOn: [table] });
+
+// ---------------------------------------------------------------------------
 // Outputs
 // ---------------------------------------------------------------------------
 
