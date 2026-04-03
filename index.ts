@@ -2,7 +2,6 @@
 
 import * as pulumi from "@pulumi/pulumi";
 import * as azure_native from "@pulumi/azure-native";
-import { RestApiPollerDataConnector } from "@pulumi/azure-native/securityinsights/v20250301";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -14,7 +13,7 @@ const accessToken = config.requireSecret("accessToken");
 const workspaceName = config.require("workspaceName");
 const resourceGroupName = config.require("resourceGroupName");
 
-const apiUrl = config.get("apiUrl") ?? "https://api.pulumi.com";
+const apiUrl = (config.get("apiUrl") ?? "https://api.pulumi.com").replace(/\/+$/, "");
 
 const connectorDefinitionName = "PulumiAuditLogsDefinition";
 const tableName = "PulumiAuditLogs_CL";
@@ -94,13 +93,13 @@ const transformKql = [
     "    UserName_s = tostring(user.name),",
     "    UserLogin_s = tostring(user.githubLogin),",
     "    UserAvatarUrl_s = tostring(user.avatarUrl),",
-    "    TokenID_s = coalesce(tokenID, \"\"),",
-    "    TokenName_s = coalesce(tokenName, \"\"),",
+    '    TokenID_s = iff(isnull(tokenID), "", tostring(tokenID)),',
+    '    TokenName_s = iff(isnull(tokenName), "", tostring(tokenName)),',
     "    ActorName_s = tostring(actorName),",
     "    ActorUrn_s = tostring(actorUrn),",
-    "    RequireOrgAdmin_b = tobool(coalesce(reqOrgAdmin, false)),",
-    "    RequireStackAdmin_b = tobool(coalesce(reqStackAdmin, false)),",
-    "    AuthFailure_b = tobool(coalesce(authFailure, false))",
+    "    RequireOrgAdmin_b = iff(isnull(reqOrgAdmin), false, tobool(reqOrgAdmin)),",
+    "    RequireStackAdmin_b = iff(isnull(reqStackAdmin), false, tobool(reqStackAdmin)),",
+    "    AuthFailure_b = iff(isnull(authFailure), false, tobool(authFailure))",
 ].join(" ");
 
 const dataCollectionRule = new azure_native.insights.DataCollectionRule("dataCollectionRule", {
@@ -278,55 +277,70 @@ const connectorDefinition = new azure_native.securityinsights.CustomizableConnec
 // ---------------------------------------------------------------------------
 // 5. RestApiPoller data connector
 //
-// Uses the v20250301 API version, which is the latest stable version that
-// supports RestApiPollerDataConnector. The SDK's typed paging config does not
-// include nextPageTokenJsonPath/nextPageParaName, but the ARM API accepts them.
-// We cast the paging object to pass these through to the provider.
+// Created via az rest because the azure-native SDK's typed
+// RestApiPollerDataConnector strips the nextPageTokenJsonPath and
+// nextPageParaName paging fields that the ARM API requires. The az rest
+// call sends the full JSON body verbatim.
 // ---------------------------------------------------------------------------
 
-const dataConnector = new RestApiPollerDataConnector("dataConnector", {
-    resourceGroupName,
-    workspaceName,
-    dataConnectorId: "PulumiAuditLogsPoller",
+import * as command from "@pulumi/command";
+
+const dataConnectorBody = pulumi.all([
+    dataCollectionEndpoint.logsIngestion,
+    dataCollectionRule.immutableId,
+    accessToken,
+]).apply(([logsIngestion, immutableId, token]) => JSON.stringify({
     kind: "RestApiPoller",
-    connectorDefinitionName: connectorDefinitionName,
-    dcrConfig: {
-        dataCollectionEndpoint: dataCollectionEndpoint.logsIngestion.apply(li => li?.endpoint ?? ""),
-        dataCollectionRuleImmutableId: dataCollectionRule.immutableId,
-        streamName,
-    },
-    dataType: tableName,
-    auth: {
-        type: "APIKey",
-        apiKeyName: "Authorization",
-        apiKey: accessToken,
-        apiKeyIdentifier: "token",
-    },
-    request: {
-        apiEndpoint: pulumi.interpolate`${apiUrl}/api/orgs/${orgName}/auditlogs/v2`,
-        httpMethod: "GET",
-        queryTimeFormat: "UnixTimestamp",
-        startTimeAttributeName: "startTime",
-        endTimeAttributeName: "endTime",
-        queryWindowInMin: 5,
-        rateLimitQPS: 2,
-        retryCount: 3,
-        timeoutInSeconds: 60,
-        headers: {
-            "Accept": "application/json",
-            "User-Agent": "Scuba",
+    properties: {
+        connectorDefinitionName,
+        dcrConfig: {
+            dataCollectionEndpoint: logsIngestion?.endpoint ?? "",
+            dataCollectionRuleImmutableId: immutableId,
+            streamName,
         },
+        dataType: tableName,
+        auth: {
+            type: "APIKey",
+            apiKeyName: "Authorization",
+            ApiKey: token,
+            apiKeyIdentifier: "token",
+        },
+        request: {
+            apiEndpoint: `${apiUrl}/api/orgs/${orgName}/auditlogs/v2`,
+            httpMethod: "GET",
+            queryTimeFormat: "UnixTimestamp",
+            startTimeAttributeName: "startTime",
+            endTimeAttributeName: "endTime",
+            queryWindowInMin: 5,
+            rateLimitQPS: 2,
+            retryCount: 3,
+            timeoutInSeconds: 60,
+            headers: {
+                Accept: "application/json",
+                "User-Agent": "Scuba",
+            },
+            queryParameters: {
+                orgName,
+            },
+        },
+        response: {
+            eventsJsonPaths: ["$.auditLogEvents"],
+            format: "json",
+        },
+        paging: {
+            pagingType: "NextPageToken",
+            nextPageTokenJsonPath: "$.continuationToken",
+            nextPageParaName: "continuationToken",
+        },
+        isActive: true,
     },
-    response: {
-        eventsJsonPaths: ["$.auditLogEvents"],
-        format: "json",
-    },
-    paging: {
-        pagingType: "NextPageToken",
-        nextPageTokenJsonPath: "$.continuationToken",
-        nextPageParaName: "continuationToken",
-    } as any,
-    isActive: true,
+}));
+
+const connectorResourceUrl = pulumi.interpolate`https://management.azure.com${workspace.id}/providers/Microsoft.SecurityInsights/dataConnectors/PulumiAuditLogsPoller?api-version=2024-04-01-preview`;
+
+const dataConnector = new command.local.Command("dataConnector", {
+    create: pulumi.interpolate`az rest --method PUT --url "${connectorResourceUrl}" --body '${dataConnectorBody}'`,
+    delete: pulumi.interpolate`az rest --method DELETE --url "${connectorResourceUrl}"`,
 }, { dependsOn: [connectorDefinition, dataCollectionRule] });
 
 // ---------------------------------------------------------------------------
@@ -363,7 +377,7 @@ const authFailureRule = new azure_native.securityinsights.ScheduledAlertRule("au
             columnName: "SourceIP_s",
         }],
     }],
-}, { dependsOn: [table] });
+}, { dependsOn: [dataCollectionRule] });
 
 const stackDeletionRule = new azure_native.securityinsights.ScheduledAlertRule("stackDeletionRule", {
     resourceGroupName,
@@ -443,7 +457,7 @@ const orgMemberChangeRule = new azure_native.securityinsights.ScheduledAlertRule
             }],
         },
     ],
-}, { dependsOn: [table] });
+}, { dependsOn: [dataCollectionRule] });
 
 // ---------------------------------------------------------------------------
 // Outputs

@@ -8,6 +8,7 @@
     },
     "dependencies": {
         "@pulumi/azure-native": "^2",
+        "@pulumi/command": "^1.2.1",
         "@pulumi/pulumi": "^3"
     }
 }
