@@ -277,13 +277,71 @@ const connectorDefinition = new azure_native.securityinsights.CustomizableConnec
 // ---------------------------------------------------------------------------
 // 5. RestApiPoller data connector
 //
-// Created via az rest because the azure-native SDK's typed
-// RestApiPollerDataConnector strips the nextPageTokenJsonPath and
-// nextPageParaName paging fields that the ARM API requires. The az rest
-// call sends the full JSON body verbatim.
+// Created via a dynamic resource that calls the ARM REST API directly,
+// because the azure-native SDK's typed RestApiPollerDataConnector strips
+// the nextPageTokenJsonPath and nextPageParaName paging fields that the
+// ARM API requires. This approach works in both the CLI path (az login)
+// and the Deployments wizard path (service principal credentials).
 // ---------------------------------------------------------------------------
 
-import * as command from "@pulumi/command";
+// Acquire an Azure management token from the Pulumi Azure provider's
+// configured credentials. This uses the same auth as all other azure-native
+// resources (service principal, OIDC, MSI, Azure CLI, etc.) without
+// requiring an extra @azure/identity dependency.
+async function getAzureManagementToken(): Promise<string> {
+    const tokenResult = await azure_native.authorization.getClientToken();
+    return tokenResult.token;
+}
+
+const dataConnectorProvider: pulumi.dynamic.ResourceProvider = {
+    async create(inputs: any) {
+        const token = await getAzureManagementToken();
+        const resp = await fetch(inputs.resourceUrl, {
+            method: "PUT",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+            },
+            body: inputs.body,
+        });
+        if (!resp.ok) {
+            throw new Error(`ARM PUT failed: ${resp.status} ${await resp.text()}`);
+        }
+        return { id: "PulumiAuditLogsPoller", outs: { resourceUrl: inputs.resourceUrl } };
+    },
+
+    async delete(id: string, props: any) {
+        const token = await getAzureManagementToken();
+        const resp = await fetch(props.resourceUrl, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        // 204 (deleted) and 404 (already gone) are both fine.
+        if (!resp.ok && resp.status !== 404) {
+            throw new Error(`ARM DELETE failed: ${resp.status} ${await resp.text()}`);
+        }
+    },
+
+    async diff(id: string, olds: any, news: any) {
+        // Detect changes in the request body (e.g., token rotation) or resource URL.
+        const replaces: string[] = [];
+        if (olds.body !== news.body) {
+            replaces.push("body");
+        }
+        if (olds.resourceUrl !== news.resourceUrl) {
+            replaces.push("resourceUrl");
+        }
+        return { changes: replaces.length > 0, replaces };
+    },
+};
+
+class DataConnectorResource extends pulumi.dynamic.Resource {
+    constructor(name: string, props: Record<string, pulumi.Input<string>>, opts?: pulumi.CustomResourceOptions) {
+        super(dataConnectorProvider, name, props, opts);
+    }
+}
+
+const connectorResourceUrl = pulumi.interpolate`https://management.azure.com${workspace.id}/providers/Microsoft.SecurityInsights/dataConnectors/PulumiAuditLogsPoller?api-version=2024-04-01-preview`;
 
 const dataConnectorBody = pulumi.all([
     dataCollectionEndpoint.logsIngestion,
@@ -336,163 +394,13 @@ const dataConnectorBody = pulumi.all([
     },
 }));
 
-const connectorResourceUrl = pulumi.interpolate`https://management.azure.com${workspace.id}/providers/Microsoft.SecurityInsights/dataConnectors/PulumiAuditLogsPoller?api-version=2024-04-01-preview`;
-
-const dataConnector = new command.local.Command("dataConnector", {
-    create: pulumi.interpolate`az rest --method PUT --url "${connectorResourceUrl}" --body '${dataConnectorBody}'`,
-    delete: pulumi.interpolate`az rest --method DELETE --url "${connectorResourceUrl}"`,
+const dataConnector = new DataConnectorResource("dataConnector", {
+    resourceUrl: connectorResourceUrl,
+    body: dataConnectorBody,
 }, { dependsOn: [connectorDefinition, dataCollectionRule] });
 
 // ---------------------------------------------------------------------------
-// 6. Historical backfill via Logs Ingestion API
-//
-// The RestApiPoller only ingests events from deployment time forward. This
-// dynamic resource runs once during `pulumi up` to backfill all historical
-// audit log events. Its diff() always returns { changes: false } so it never
-// re-runs on subsequent updates, preventing duplicates.
-//
-// Duplicate-prevention note: there is a small overlap window between the
-// backfill's endTime and the poller's first poll that may produce duplicates.
-// If exact dedup is needed at query time, use:
-//   PulumiAuditLogs_CL
-//   | summarize arg_min(TimeGenerated, *) by Timestamp_d, Event_s, Description_s
-// ---------------------------------------------------------------------------
-
-import { execSync } from "child_process";
-
-// The Logs Ingestion API requires the caller to have the "Monitoring Metrics
-// Publisher" role (3913510d-42f4-4e42-8a64-420c390055eb) on the DCR. This
-// role assignment grants that to the user running `pulumi up`.
-const currentUser = azure_native.authorization.getClientConfigOutput({});
-const metricsPublisherRole = new azure_native.authorization.RoleAssignment("metricsPublisherRole", {
-    scope: dataCollectionRule.id,
-    principalId: currentUser.objectId,
-    principalType: "User",
-    roleDefinitionId: pulumi.interpolate`/subscriptions/${currentUser.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/3913510d-42f4-4e42-8a64-420c390055eb`,
-});
-
-const backfillProvider: pulumi.dynamic.ResourceProvider = {
-    async create(inputs: any) {
-        // Get an Azure bearer token for the Logs Ingestion API.
-        // The az CLI is already required for the data connector command above.
-        const azToken = execSync(
-            "az account get-access-token --resource https://monitor.azure.com --query accessToken -o tsv",
-        ).toString().trim();
-
-        // Record the current time as the backfill cutoff. There may be a
-        // small overlap with the poller's first poll window, but a duplicate
-        // row is preferable to a missing row for security audit logs.
-        const endTime = Math.floor(Date.now() / 1000);
-
-        const logsIngestionUrl =
-            `${inputs.dceEndpoint}/dataCollectionRules/${inputs.dcrImmutableId}` +
-            `/streams/${inputs.streamName}?api-version=2023-01-01`;
-
-        // Helper to POST events to the Logs Ingestion API with retries.
-        // Azure RBAC role assignments can take up to 5 minutes to propagate,
-        // so we retry 403s to handle the case where the Monitoring Metrics
-        // Publisher role was just assigned in the same `pulumi up`.
-        const postWithRetry = async (body: string): Promise<void> => {
-            const maxRetries = 10;
-            const retryDelaySec = 30;
-            for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                const ingestResp = await fetch(logsIngestionUrl, {
-                    method: "POST",
-                    headers: {
-                        Authorization: `Bearer ${azToken}`,
-                        "Content-Type": "application/json",
-                    },
-                    body,
-                });
-                if (ingestResp.ok) {
-                    return;
-                }
-                const text = await ingestResp.text();
-                if (ingestResp.status === 403 && attempt < maxRetries) {
-                    console.log(
-                        `Waiting for RBAC propagation (attempt ${attempt}/${maxRetries}, ` +
-                        `retrying in ${retryDelaySec}s)...`,
-                    );
-                    await new Promise(r => setTimeout(r, retryDelaySec * 1000));
-                    continue;
-                }
-                throw new Error(
-                    `Logs Ingestion API returned ${ingestResp.status}: ${text}`,
-                );
-            }
-        };
-
-        let continuationToken: string | undefined;
-        let totalEvents = 0;
-
-        do {
-            // Build the audit log API URL with pagination parameters.
-            const params = new URLSearchParams({
-                startTime: "0",
-                endTime: endTime.toString(),
-            });
-            if (continuationToken) {
-                params.set("continuationToken", continuationToken);
-            }
-            const auditUrl = `${inputs.apiUrl}/api/orgs/${inputs.orgName}/auditlogs/v2?${params}`;
-
-            const resp = await fetch(auditUrl, {
-                headers: {
-                    Authorization: `token ${inputs.pulumiToken}`,
-                    Accept: "application/json",
-                },
-            });
-            if (!resp.ok) {
-                throw new Error(
-                    `Audit log API returned ${resp.status}: ${await resp.text()}`,
-                );
-            }
-
-            const data = await resp.json() as {
-                auditLogEvents: Record<string, unknown>[];
-                continuationToken?: string;
-            };
-            const events = data.auditLogEvents;
-
-            if (!events || events.length === 0) {
-                break;
-            }
-
-            // POST events to the Logs Ingestion API. Each page is ~100 events
-            // (~43 KB), well under the 1 MB API limit.
-            await postWithRetry(JSON.stringify(events));
-
-            totalEvents += events.length;
-            continuationToken = data.continuationToken;
-        } while (continuationToken);
-
-        return { id: "backfill", outs: { eventCount: totalEvents, endTime } };
-    },
-
-    async diff(_id: string, _olds: any, _news: any) {
-        // Never re-run — the backfill is a one-time operation. Returning
-        // changes: false prevents replacement even if inputs change.
-        return { changes: false };
-    },
-};
-
-class BackfillResource extends pulumi.dynamic.Resource {
-    constructor(name: string, props: Record<string, pulumi.Input<string>>, opts?: pulumi.CustomResourceOptions) {
-        super(backfillProvider, name, props, opts);
-    }
-}
-
-const backfill = new BackfillResource("backfill", {
-    dceEndpoint: dataCollectionEndpoint.logsIngestion.apply(li => li?.endpoint ?? ""),
-    dcrImmutableId: dataCollectionRule.immutableId,
-    pulumiToken: accessToken,
-    apiUrl,
-    orgName,
-    streamName,
-}, { dependsOn: [dataConnector, dataCollectionRule, metricsPublisherRole] });
-
-// ---------------------------------------------------------------------------
-// 7. Analytic rules
+// 6. Analytic rules
 // ---------------------------------------------------------------------------
 
 const authFailureRule = new azure_native.securityinsights.ScheduledAlertRule("authFailureRule", {
@@ -616,4 +524,3 @@ export const dataCollectionRuleId = dataCollectionRule.id;
 export const tableId = table.id;
 export const connectorDefinitionId = connectorDefinition.id;
 export const dataConnectorId = dataConnector.id;
-export const backfillEventCount = backfill.id.apply(() => "complete");
