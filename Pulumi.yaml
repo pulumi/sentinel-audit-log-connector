@@ -14,9 +14,6 @@ template:
       description: Log Analytics workspace name (must already exist with Sentinel enabled)
     resourceGroupName:
       description: Azure resource group containing the Sentinel workspace
-    apiUrl:
-      description: "[TESTING ONLY - remove before release] Pulumi Cloud API URL override"
-      default: https://api.pulumi.com
     azure-native:location:
       description: Azure region (e.g. eastus, westus2)
       default: eastus

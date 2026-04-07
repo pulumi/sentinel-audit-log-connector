@@ -1,38 +1,148 @@
 # Pulumi Cloud Audit Logs Connector for Microsoft Sentinel
 
-A [Pulumi template](https://www.pulumi.com/docs/cli/commands/pulumi_new/) that deploys a [Codeless Connector (CCF)](https://learn.microsoft.com/en-us/azure/sentinel/create-codeless-connector) to continuously export [Pulumi Cloud audit log events](https://www.pulumi.com/docs/pulumi-cloud/audit-logs/) into Microsoft Sentinel. The connector polls the Pulumi Cloud REST API every 5 minutes and writes events to a custom `PulumiAuditLogs_CL` table in your Log Analytics workspace.
+A [Pulumi template](https://www.pulumi.com/docs/cli/commands/pulumi_new/) that deploys a [Codeless Connector (CCF)](https://learn.microsoft.com/en-us/azure/sentinel/create-codeless-connector) to continuously export [Pulumi Cloud audit log events](https://www.pulumi.com/docs/pulumi-cloud/audit-logs/) into Microsoft Sentinel.
 
-No Azure Functions, Logic Apps, or other compute resources are needed — Azure Sentinel handles polling, pagination, checkpointing, and retry automatically.
+The connector uses Azure Sentinel's managed RestApiPoller to poll the Pulumi Cloud REST API every 5 minutes. Events are transformed via a KQL Data Collection Rule and written to a custom `PulumiAuditLogs_CL` table in your Log Analytics workspace. No Azure Functions, Logic Apps, or other compute resources are needed — Sentinel handles polling, pagination, checkpointing, and retry automatically.
+
+The template also deploys three pre-built analytic rules:
+- **Excessive Authentication Failures** — more than 5 auth failures from a single IP in 15 minutes
+- **Stack Deleted** — alerts when a Pulumi stack is destroyed
+- **Organization Membership Change** — tracks members added, removed, or role-changed
+
+## How It Works
+
+The template creates the following Azure resources:
+
+1. **Custom Log Analytics table** (`PulumiAuditLogs_CL`) — 15 typed columns covering event metadata, user info, token details, and security flags
+2. **Data Collection Endpoint** — ingestion endpoint for the connector
+3. **Data Collection Rule** — KQL transform that maps raw API responses to the table schema, handling nullable boolean/string fields
+4. **Connector UI definition** — makes the connector visible in the Sentinel Data Connectors gallery
+5. **RestApiPoller data connector** — polls `GET /api/orgs/{orgName}/auditlogs/v2` every 5 minutes with pagination support
+6. **Three analytic rules** — pre-built detection rules for common security scenarios
+
+The poller authenticates to the Pulumi Cloud API using an access token and handles pagination via continuation tokens. Events are ingested forward from deployment time — there is no historical backfill (consistent with the existing S3 audit log export).
+
+### What gets ingested
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `TimeGenerated` | datetime | When the event occurred (UTC) |
+| `Event_s` | string | Event type (e.g., `stack-created`, `member-added`) |
+| `Description_s` | string | Human-readable event description |
+| `SourceIP_s` | string | Client IP address |
+| `UserName_s` / `UserLogin_s` | string | User display name / GitHub login |
+| `TokenID_s` / `TokenName_s` | string | Access token ID and name (if applicable) |
+| `ActorName_s` / `ActorUrn_s` | string | Non-human actor name and Pulumi URN |
+| `RequireOrgAdmin_b` | boolean | Action required org admin privileges |
+| `RequireStackAdmin_b` | boolean | Action required stack admin privileges |
+| `AuthFailure_b` | boolean | Failed authentication attempt |
 
 ## Prerequisites
 
-- A Microsoft Sentinel workspace (Log Analytics workspace with Sentinel enabled)
-- A Pulumi Cloud organization with an **Enterprise** or **Business Critical** subscription (audit logs are an enterprise feature)
-- A [Pulumi access token](https://app.pulumi.com/account/tokens) with audit log read permissions (org-scoped service token recommended)
+- A Pulumi Cloud organization with a **Business Critical** subscription (audit logs require this tier)
+- A [Pulumi access token](https://app.pulumi.com/account/tokens) with audit log read permissions — we recommend an **org-scoped service token** (survives employee offboarding, can be scoped to minimum permissions)
+- An Azure resource group with a Log Analytics workspace and Microsoft Sentinel enabled. If you don't have these:
+  ```bash
+  az group create -n <resource-group> -l <region>
+  az monitor log-analytics workspace create -g <resource-group> -n <workspace-name> -l <region>
+  az sentinel onboarding-state create -g <resource-group> -w <workspace-name> -n default --customer-managed-key false
+  ```
 
-## Deploy
+## Setup Option 1: Connect to Azure Sentinel Button (Recommended)
 
-### Option 1: Deploy with Pulumi (recommended)
+The easiest path — no CLI install needed.
 
-Click the button below to open the Pulumi New Project Wizard with this template pre-selected:
+1. In Pulumi Cloud, go to **Settings** > **Audit Log Export** and click **"Connect to Azure Sentinel"**. This opens the New Project Wizard with the template pre-selected.
 
-[![Deploy with Pulumi](https://get.pulumi.com/new/button.svg)](https://app.pulumi.com/new?template=https://github.com/pulumi/sentinel-audit-log-connector)
+   Or navigate directly to:
+   ```
+   https://app.pulumi.com/new?template=https://github.com/pulumi/sentinel-audit-log-connector
+   ```
 
-The wizard will prompt you for your Pulumi org name, access token, Sentinel workspace, resource group, and Azure region. Select **Pulumi Deployments** to run `pulumi up` server-side — no CLI install needed.
+2. Fill in the config values:
+   - **orgName**: Your Pulumi Cloud organization name
+   - **accessToken**: Your Pulumi access token (masked input, stored encrypted)
+   - **workspaceName**: Name of your existing Log Analytics workspace
+   - **resourceGroupName**: Azure resource group containing the workspace
+   - **azure-native:location**: Azure region (defaults to `eastus`)
 
-### Option 2: Deploy via CLI
+3. Choose **"Pulumi Deployments (No-code)"** as the deployment method.
+
+4. Select an ESC environment with your Azure credentials. The environment needs standard `ARM_*` environment variables (`ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID`). If you already use Azure with Pulumi Deployments, your existing ESC environment will work.
+
+   If you don't have one, create an ESC environment via **Environments** > **Create new environment** with this YAML:
+   ```yaml
+   values:
+     azure:
+       login:
+         fn::open::azure-login:
+           clientId: <service-principal-app-id>
+           clientSecret:
+             fn::secret: <service-principal-password>
+           tenantId: <tenant-id>
+           subscriptionId: <subscription-id>
+     environmentVariables:
+       ARM_CLIENT_ID: ${azure.login.clientId}
+       ARM_CLIENT_SECRET: ${azure.login.clientSecret}
+       ARM_TENANT_ID: ${azure.login.tenantId}
+       ARM_SUBSCRIPTION_ID: ${azure.login.subscriptionId}
+   ```
+
+5. Click **Deploy**. Pulumi Deployments runs `pulumi up` server-side.
+
+6. Verify: go to **Microsoft Sentinel** > your workspace > **Data connectors** > find "Pulumi Cloud Audit Logs". Wait ~5 minutes for the first poll, then check **Logs**:
+   ```kql
+   PulumiAuditLogs_CL
+   | sort by TimeGenerated desc
+   | take 10
+   ```
+
+## Setup Option 2: CLI
+
+1. Ensure you have Azure CLI installed and authenticated (`az login`).
+
+2. Create a new project from the template:
+   ```bash
+   mkdir sentinel-connector && cd sentinel-connector
+   pulumi new https://github.com/pulumi/sentinel-audit-log-connector
+   ```
+
+3. When prompted, enter the config values:
+   - **orgName**: Your Pulumi Cloud organization name
+   - **accessToken**: Your Pulumi access token (masked input, stored encrypted in stack config)
+   - **workspaceName**: Name of your existing Log Analytics workspace
+   - **resourceGroupName**: Azure resource group containing the workspace
+   - **azure-native:location**: Azure region (defaults to `eastus`)
+
+4. Deploy:
+   ```bash
+   pulumi up
+   ```
+
+5. Verify: go to **Microsoft Sentinel** > your workspace > **Data connectors** > find "Pulumi Cloud Audit Logs". Wait ~5 minutes for the first poll, then check **Logs**:
+   ```kql
+   PulumiAuditLogs_CL
+   | sort by TimeGenerated desc
+   | take 10
+   ```
+
+### Updating the access token
 
 ```bash
-pulumi new https://github.com/pulumi/sentinel-audit-log-connector
-# Enter config values when prompted (access token is stored as an encrypted secret)
+pulumi config set --secret accessToken <new-token>
 pulumi up
 ```
 
-### Option 3: Deploy with Pulumi ESC
+This replaces the data connector (delete + create). The poller reconnects in seconds with no data loss.
 
-For centralized secret management, store your Pulumi access token in a [Pulumi ESC environment](https://www.pulumi.com/docs/esc/) (optionally backed by Azure Key Vault) and attach it to the stack. The token is resolved automatically at deployment time.
+### Tearing down
 
-### Configuration
+```bash
+pulumi destroy
+pulumi stack rm <stack-name>
+```
+
+## Configuration Reference
 
 | Config key | Description | Required | Default |
 |------------|-------------|----------|---------|
@@ -41,46 +151,11 @@ For centralized secret management, store your Pulumi access token in a [Pulumi E
 | `workspaceName` | Log Analytics workspace name | Yes | — |
 | `resourceGroupName` | Azure resource group containing the workspace | Yes | — |
 | `azure-native:location` | Azure region | No | `eastus` |
-| `apiUrl` | Pulumi API URL (for self-hosted instances) | No | `https://api.pulumi.com` |
+| `apiUrl` | Pulumi API URL (for self-hosted instances only) | No | `https://api.pulumi.com` |
 
-## What gets deployed
-
-The template creates five Azure resources:
-
-1. **Custom Log Analytics table** (`PulumiAuditLogs_CL`) — 15 typed columns
-2. **Data Collection Endpoint** — ingestion endpoint for the connector
-3. **Data Collection Rule** — KQL transform that maps API responses to the table schema
-4. **Connector UI definition** — makes the connector visible in the Sentinel portal
-5. **RestApiPoller data connector** — polls the audit log API every 5 minutes
-
-To remove everything: `pulumi destroy`
-
-## What gets ingested
-
-Events are written to the `PulumiAuditLogs_CL` table:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `TimeGenerated` | datetime | When the event occurred (UTC) |
-| `Event_s` | string | Event type (e.g., `stack-created`, `member-added`) |
-| `Description_s` | string | Human-readable event description |
-| `SourceIP_s` | string | Client IP address |
-| `UserName_s` | string | User display name |
-| `UserLogin_s` | string | User GitHub login |
-| `UserAvatarUrl_s` | string | User avatar URL |
-| `TokenID_s` | string | Access token ID (if applicable) |
-| `TokenName_s` | string | Access token name (if applicable) |
-| `ActorName_s` | string | Non-human actor name (e.g., deploy token) |
-| `ActorUrn_s` | string | Non-human actor Pulumi URN |
-| `RequireOrgAdmin_b` | boolean | Action required org admin privileges |
-| `RequireStackAdmin_b` | boolean | Action required stack admin privileges |
-| `AuthFailure_b` | boolean | Failed authentication attempt |
-
-## Sample queries
+## Sample Queries
 
 ### Excessive authentication failures
-
-Detect more than 5 authentication failures from a single IP in 15 minutes:
 
 ```kql
 PulumiAuditLogs_CL
@@ -103,42 +178,11 @@ PulumiAuditLogs_CL
 | where Event_s in ("member-added", "member-removed", "member-role-changed")
 ```
 
-## Token permissions
+## Known Limitations
 
-The access token needs a role with `RbacPermissionAuditLogsRead`. We recommend using an **org-scoped service token** rather than a personal access token — service tokens are not tied to a specific user and won't break if someone leaves the organization.
-
-## Self-hosted Pulumi Cloud
-
-If you run a self-hosted Pulumi Cloud instance, set the `apiUrl` config value to your instance's API URL (e.g., `https://api.your-company.com`). Azure Sentinel's CCF infrastructure uses the [Scuba service tag](https://learn.microsoft.com/en-us/azure/virtual-network/service-tags-overview#available-service-tags) — you may need to allowlist these IPs if your instance is not publicly accessible.
-
-## Troubleshooting
-
-- **No data appearing**: Allow up to 10 minutes after initial setup. Verify your access token is valid and the organization has audit logs enabled (Enterprise subscription required).
-- **HTTP 400 from the API**: The organization likely lacks an Enterprise subscription. The API returns HTTP 400 (not 401/403) with "Audit Logs is available only to organizations with an Enterprise subscription."
-- **Connector shows "disconnected"**: Check that the access token has not been revoked. Update the token in Pulumi config and run `pulumi up` to propagate the change.
-- **Connector not visible in Sentinel**: Refresh the Data connectors gallery. The connector appears under the name "Pulumi Cloud Audit Logs."
-
-## Architecture
-
-```
-Microsoft Sentinel (your Azure subscription)
-    |
-    +-- Connector Definition (UI in Sentinel portal)
-    +-- RestApiPoller (polls every 5 min)
-    |       |
-    |       +-- GET https://api.pulumi.com/api/orgs/{orgName}/auditlogs/v2
-    |               ?startTime={windowStart}&endTime={windowEnd}
-    |               Authorization: token <pulumi-access-token>
-    |
-    +-- Data Collection Endpoint + Data Collection Rule (KQL transform)
-    |
-    +-- PulumiAuditLogs_CL (custom Log Analytics table)
-```
-
-## Known limitations
-
-- **No historical backfill**: The connector only polls from the time it is deployed. Historical events must be backfilled separately via the REST API.
-- **Org name changes**: If the Pulumi org is renamed, the connector's hardcoded org name becomes invalid (404). Update the config and run `pulumi up`.
+- **No historical backfill**: The connector ingests events forward from deployment time only, consistent with the existing S3 audit log export. Historical events can be exported via CSV or the audit log REST API.
+- **Org name changes**: If the Pulumi org is renamed, the poller's hardcoded `orgName` becomes invalid. Update the config and run `pulumi up`.
+- **Token rotation requires resource replacement**: Changing the access token replaces the data connector (delete + create). This takes seconds with no data loss.
 
 ## License
 
