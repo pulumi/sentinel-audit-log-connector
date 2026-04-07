@@ -274,10 +274,18 @@ const connectorDefinition = new azure_native.securityinsights.CustomizableConnec
 // This is used inside the dynamic resource provider, which is serialized
 // and cannot call Pulumi SDK functions like authorization.getClientToken().
 // DefaultAzureCredential supports all auth methods: service principal,
-// OIDC, MSI, Azure CLI, etc.
+// Pulumi ESC / azure-native sets ARM_* env vars, but @azure/identity's
+// DefaultAzureCredential expects AZURE_* env vars. Bridge the gap by
+// constructing a ClientSecretCredential from ARM_* when available,
+// falling back to DefaultAzureCredential for CLI users (az login, etc.).
 async function getAzureManagementToken(): Promise<string> {
-    const { DefaultAzureCredential } = await import("@azure/identity");
-    const credential = new DefaultAzureCredential();
+    const identity = await import("@azure/identity");
+    const clientId = process.env.ARM_CLIENT_ID;
+    const clientSecret = process.env.ARM_CLIENT_SECRET;
+    const tenantId = process.env.ARM_TENANT_ID;
+    const credential = clientId && clientSecret && tenantId
+        ? new identity.ClientSecretCredential(tenantId, clientId, clientSecret)
+        : new identity.DefaultAzureCredential();
     const token = await credential.getToken("https://management.azure.com/.default");
     return token.token;
 }
