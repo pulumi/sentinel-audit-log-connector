@@ -62,11 +62,11 @@ const table = new azure_native.operationalinsights.Table("table", {
 // 2. Data Collection Endpoint
 // ---------------------------------------------------------------------------
 
-const dataCollectionEndpoint = new azure_native.insights.DataCollectionEndpoint("dataCollectionEndpoint", {
+const dataCollectionEndpoint = new azure_native.monitor.DataCollectionEndpoint("dataCollectionEndpoint", {
     resourceGroupName,
     dataCollectionEndpointName: "PulumiAuditLogsDCE",
     networkAcls: {
-        publicNetworkAccess: azure_native.insights.KnownPublicNetworkAccessOptions.Enabled,
+        publicNetworkAccess: azure_native.monitor.KnownPublicNetworkAccessOptions.Enabled,
     },
 });
 
@@ -102,7 +102,7 @@ const transformKql = [
     "    AuthFailure_b = iff(isnull(authFailure), false, tobool(authFailure))",
 ].join(" ");
 
-const dataCollectionRule = new azure_native.insights.DataCollectionRule("dataCollectionRule", {
+const dataCollectionRule = new azure_native.monitor.DataCollectionRule("dataCollectionRule", {
     resourceGroupName,
     dataCollectionRuleName: "PulumiAuditLogsDCR",
     dataCollectionEndpointId: dataCollectionEndpoint.id,
@@ -159,29 +159,28 @@ const connectorDefinition = new azure_native.securityinsights.CustomizableConnec
             "track organization membership changes, and investigate security incidents.",
             "\n\nThis connector polls the Pulumi Cloud REST API to retrieve audit log events for your organization.",
         ].join(" "),
-        graphQueriesTableName: tableName,
         graphQueries: [{
             metricName: "Total events received",
             legend: "PulumiAuditLogEvents",
-            baseQuery: "{{graphQueriesTableName}}",
+            baseQuery: tableName,
         }],
         sampleQueries: [
             {
                 description: "All Pulumi audit log events",
-                query: "{{graphQueriesTableName}}\n| sort by TimeGenerated desc\n| take 10",
+                query: `${tableName}\n| sort by TimeGenerated desc\n| take 10`,
             },
             {
                 description: "Authentication failures",
-                query: "{{graphQueriesTableName}}\n| where AuthFailure_b == true\n| sort by TimeGenerated desc",
+                query: `${tableName}\n| where AuthFailure_b == true\n| sort by TimeGenerated desc`,
             },
             {
                 description: "Stack deletions",
-                query: '{{graphQueriesTableName}}\n| where Event_s == "stack-deleted"\n| sort by TimeGenerated desc',
+                query: `${tableName}\n| where Event_s == "stack-deleted"\n| sort by TimeGenerated desc`,
             },
         ],
         dataTypes: [{
-            name: "{{graphQueriesTableName}}",
-            lastDataReceivedQuery: "{{graphQueriesTableName}}\n| summarize Time = max(TimeGenerated)\n| where isnotempty(Time)",
+            name: tableName,
+            lastDataReceivedQuery: `${tableName}\n| summarize Time = max(TimeGenerated)\n| where isnotempty(Time)`,
         }],
         connectivityCriteria: [{
             type: "HasDataConnectors",
@@ -519,7 +518,7 @@ const orgMemberChangeRule = new azure_native.securityinsights.ScheduledAlertRule
 // Outputs
 // ---------------------------------------------------------------------------
 
-export const dataCollectionEndpointUrl = dataCollectionEndpoint.logsIngestion.apply(li => li?.endpoint);
+export const dataCollectionEndpointUrl = dataCollectionEndpoint.logsIngestion.apply((li: any) => li?.endpoint);
 export const dataCollectionRuleId = dataCollectionRule.id;
 export const tableId = table.id;
 export const connectorDefinitionId = connectorDefinition.id;
