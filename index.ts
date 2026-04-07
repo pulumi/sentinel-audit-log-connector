@@ -65,6 +65,7 @@ const table = new azure_native.operationalinsights.Table("table", {
 const dataCollectionEndpoint = new azure_native.monitor.DataCollectionEndpoint("dataCollectionEndpoint", {
     resourceGroupName,
     dataCollectionEndpointName: "PulumiAuditLogsDCE",
+    location: workspace.location,
     networkAcls: {
         publicNetworkAccess: azure_native.monitor.KnownPublicNetworkAccessOptions.Enabled,
     },
@@ -136,7 +137,7 @@ const dataCollectionRule = new azure_native.monitor.DataCollectionRule("dataColl
         transformKql,
         outputStream: `${streamName}_CL`,
     }],
-}, { dependsOn: [table] });
+}, { dependsOn: [table, dataCollectionEndpoint] });
 
 // ---------------------------------------------------------------------------
 // 4. Connector UI definition
