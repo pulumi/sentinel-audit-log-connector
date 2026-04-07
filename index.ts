@@ -269,20 +269,25 @@ const connectorDefinition = new azure_native.securityinsights.CustomizableConnec
 // and the Deployments wizard path (service principal credentials).
 // ---------------------------------------------------------------------------
 
-// Get an Azure management token from the Pulumi Azure provider's configured
-// credentials, then pass it as an input to the dynamic resource. We resolve
-// the token here (not inside the provider) because dynamic resource providers
-// are serialized and cannot call Pulumi SDK functions.
-const azureManagementToken = pulumi.output(
-    azure_native.authorization.getClientToken()
-).apply(result => result.token);
+// Acquire a fresh Azure management token using DefaultAzureCredential.
+// This is used inside the dynamic resource provider, which is serialized
+// and cannot call Pulumi SDK functions like authorization.getClientToken().
+// DefaultAzureCredential supports all auth methods: service principal,
+// OIDC, MSI, Azure CLI, etc.
+async function getAzureManagementToken(): Promise<string> {
+    const { DefaultAzureCredential } = await import("@azure/identity");
+    const credential = new DefaultAzureCredential();
+    const token = await credential.getToken("https://management.azure.com/.default");
+    return token.token;
+}
 
 const dataConnectorProvider: pulumi.dynamic.ResourceProvider = {
     async create(inputs: any) {
+        const token = await getAzureManagementToken();
         const resp = await fetch(inputs.resourceUrl, {
             method: "PUT",
             headers: {
-                Authorization: `Bearer ${inputs.azureToken}`,
+                Authorization: `Bearer ${token}`,
                 "Content-Type": "application/json",
             },
             body: inputs.body,
@@ -294,12 +299,10 @@ const dataConnectorProvider: pulumi.dynamic.ResourceProvider = {
     },
 
     async delete(id: string, props: any) {
-        // Re-fetch a token for delete since the original may have expired.
-        // Dynamic providers can't call the Pulumi SDK, so we use
-        // @azure/identity as a fallback for delete operations.
+        const token = await getAzureManagementToken();
         const resp = await fetch(props.resourceUrl, {
             method: "DELETE",
-            headers: { Authorization: `Bearer ${props.azureToken}` },
+            headers: { Authorization: `Bearer ${token}` },
         });
         // 204 (deleted) and 404 (already gone) are both fine.
         if (!resp.ok && resp.status !== 404) {
@@ -382,7 +385,6 @@ const dataConnectorBody = pulumi.all([
 const dataConnector = new DataConnectorResource("dataConnector", {
     resourceUrl: connectorResourceUrl,
     body: dataConnectorBody,
-    azureToken: azureManagementToken,
 }, { dependsOn: [connectorDefinition, dataCollectionRule] });
 
 // ---------------------------------------------------------------------------
