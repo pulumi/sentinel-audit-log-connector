@@ -164,20 +164,6 @@ const connectorDefinition = new azure_native.securityinsights.CustomizableConnec
             legend: "PulumiAuditLogEvents",
             baseQuery: tableName,
         }],
-        sampleQueries: [
-            {
-                description: "All Pulumi audit log events",
-                query: `${tableName}\n| sort by TimeGenerated desc\n| take 10`,
-            },
-            {
-                description: "Authentication failures",
-                query: `${tableName}\n| where AuthFailure_b == true\n| sort by TimeGenerated desc`,
-            },
-            {
-                description: "Stack deletions",
-                query: `${tableName}\n| where Event_s == "stack-deleted"\n| sort by TimeGenerated desc`,
-            },
-        ],
         dataTypes: [{
             name: tableName,
             lastDataReceivedQuery: `${tableName}\n| summarize Time = max(TimeGenerated)\n| where isnotempty(Time)`,
