@@ -17,9 +17,6 @@ template:
     enableAnalyticRules:
       description: Deploy pre-built Sentinel analytic rules (auth failures, stack deletions, membership changes)
       default: "true"
-    apiUrl:
-      description: "[TESTING ONLY - remove before release] Pulumi Cloud API URL override"
-      default: https://api.pulumi.com
     azure-native:location:
       description: Azure region (e.g. eastus, westus2)
       default: eastus
